@@ -1,6 +1,7 @@
 require 'crawler_rocks'
 require 'json'
 require 'iconv'
+require 'isbn'
 require 'pry'
 
 require 'thread'
@@ -21,21 +22,7 @@ class CyuanhuaBookCrawler
     @books = []
     @threads = []
 
-    r = RestClient.post(@post_action, {
-      :lpszSearchFor => ' ',
-      'SEARCHBOOK' => 'title',
-      'go-button_pressed.x' => 38,
-      'go-button_pressed.y' => 9,
-      'go-button_pressed' => 'Go',
-    }) do |response, request, result, &block|
-      if [301, 302, 307].include? response.code
-        @cookies = response.cookies
-        response.follow_redirection(request, result, &block)
-      else
-        response.return!(request, result, &block)
-      end
-    end
-
+    r = post_search
     doc = Nokogiri::HTML(@ic.iconv r)
 
     table_selector = 'table[border="0"][cellpadding="0"][cellspacing="0"][width="100%"]'
@@ -45,6 +32,7 @@ class CyuanhuaBookCrawler
     page_count = tables.css('td.fw font')[3].text.to_i
 
     # (1..5).each do |i|
+    done_page_count = 0
     (1..page_count).each do |i|
       sleep(1) until (
         @threads.delete_if { |t| !t.status };  # remove dead (ended) threads
@@ -55,7 +43,8 @@ class CyuanhuaBookCrawler
         doc = Nokogiri::HTML(@ic.iconv r)
 
         @book_urls.concat doc.css('a').map{|a| a[:href]}.select{|href| href.match(/\.\.\/search\/bookinfo\.asp\?isbn=/)}.map{|href| URI.join(@search_url, href).to_s }
-        print "#{i}\n"
+        done_page_count += 1
+        print "#{done_page_count} / #{page_count}\n"
       end
     end
 
@@ -66,13 +55,23 @@ class CyuanhuaBookCrawler
     @threads = []
 
     book_count = @book_urls.count
+    done_book_count = 0
+
     @book_urls.each_with_index do |url, index|
       sleep(1) until (
         @threads.delete_if { |t| !t.status };  # remove dead (ended) threads
-        @threads.count < (ENV['MAX_THREADS'] || 25)
+        @threads.count < (ENV['MAX_THREADS'] || 5)
       )
       @threads << Thread.new do
-        r = RestClient.get url
+        begin
+          r = RestClient.get url, cookies: @cookies
+        rescue Exception => e
+          print "error! #{url}\n"
+          post_search()
+          sleep 3
+          # r = RestClient.get url, cookies: @cookies
+          redo
+        end
         doc = Nokogiri::HTML(@ic.iconv(r))
         # isbn = CGI.parse(URI.parse(url).query)["isbn"].first
 
@@ -92,6 +91,7 @@ class CyuanhuaBookCrawler
           str.match(/ISBN.+?\：(.+?)\s+?/) do |m|
             if m[1].length != 13
               isbn_10 = m[1]
+              isbn = isbn_to_13(isbn_10)
             else
               isbn = m[1]
             end
@@ -107,13 +107,63 @@ class CyuanhuaBookCrawler
           external_image_url: external_image_url,
           price: price,
           publisher: publisher,
-          internal_code: internal_code
+          internal_code: internal_code,
+          url: url,
         }
-        print "#{index} / #{book_count}\n"
-      end
-    end
+        done_book_count += 1
+        print "#{done_book_count} / #{book_count}\n"
+      end # end Thread
+    end # end each book_urls
     ThreadsWait.all_waits(*@threads)
     @books
+  end
+
+  def post_search
+    RestClient.post(@post_action, {
+      :lpszSearchFor => ' ',
+      'SEARCHBOOK' => 'title',
+      'go-button_pressed.x' => 38,
+      'go-button_pressed.y' => 9,
+      'go-button_pressed' => 'Go',
+    }) do |response, request, result, &block|
+      if [301, 302, 307].include? response.code
+        @cookies = response.cookies
+        response.follow_redirection(request, result, &block)
+      else
+        response.return!(request, result, &block)
+      end
+    end
+  end
+
+  def isbn_to_13 isbn
+    case isbn.length
+    when 13
+      return ISBN.thirteen isbn
+    when 10
+      return ISBN.thirteen isbn
+    when 12
+      return "#{isbn}#{isbn_checksum(isbn)}"
+    when 9
+      return ISBN.thirteen("#{isbn}#{isbn_checksum(isbn)}")
+    end
+  end
+
+  def isbn_checksum(isbn)
+    isbn.gsub!(/[^(\d|X)]/, '')
+    c = 0
+    if isbn.length <= 10
+      10.downto(2) {|i| c += isbn[10-i].to_i * i}
+      c %= 11
+      c = 11 - c
+      c ='X' if c == 10
+      return c
+    elsif isbn.length <= 13
+      (1..11).step(2) {|i| c += isbn[i].to_i}
+      c *= 3
+      (0..11).step(2) {|i| c += isbn[i].to_i}
+      c = (220-c) % 10
+      return c
+    end
   end
 end
 
