@@ -3,6 +3,7 @@ require 'json'
 require 'iconv'
 require 'isbn'
 require 'pry'
+require 'book_toolkit'
 
 require 'thread'
 require 'thwait'
@@ -10,7 +11,10 @@ require 'thwait'
 class CyuanhuaBookCrawler
   include CrawlerRocks::DSL
 
-  def initialize
+  def initialize update_progress: nil, after_each: nil
+    @update_progress_proc = update_progress
+    @after_each_proc = after_each
+
     @search_url = "http://www.opentech.com.tw/search/result.asp"
     @post_action = "http://www.opentech.com.tw/search_top.asp"
     @index_url = "http://www.opentech.com.tw/index2N.asp"
@@ -80,18 +84,18 @@ class CyuanhuaBookCrawler
 
         name = doc.css('.fw1').text.strip.gsub(/^[\ \s]+/, '')
 
-        author = nil; price = nil; publisher = nil; isbn = nil; isbn_10 = nil;
+        author = nil; original_price = nil; publisher = nil; isbn = nil; isbn_10 = nil;
         internal_code = nil;
         table = doc.css('table[width="600"] td.fw')[0]
         table.css('tr').each do |row|
           str = row.text.strip
           str.match(/作\(譯\)者：/) {|m| author = str.split('：').last.strip}
-          str.match(/定　價：NT\$([\d,]+)/) {|m| price = m[1].gsub(/[^\d]/, '').to_i }
+          str.match(/定　價：NT\$([\d,]+)/) {|m| original_price = m[1].gsub(/[^\d]/, '').to_i }
           str.match(/出版商：(.+?)\s+?/) {|m| publisher = m[1] }
           str.match(/ISBN.+?\：(.+?)\s+?/) do |m|
             if m[1].length != 13
               isbn_10 = m[1]
-              isbn = isbn_to_13(isbn_10)
+              isbn = isbn_10
             else
               isbn = m[1]
             end
@@ -99,19 +103,33 @@ class CyuanhuaBookCrawler
           str.match(/書號\：(.+?)\s+?/) {|m| internal_code = m[1] }
         end
 
-        @books << {
+        invalid_isbn = nil
+        begin
+          isbn = BookToolkit.to_isbn13(isbn)
+        rescue Exception => e
+          invalid_isbn = isbn
+          isbn = nil
+        end
+
+        book = {
           name: name,
           isbn: isbn,
+          invalid_isbn: isbn,
           isbn_10: isbn_10,
           author: author,
           external_image_url: external_image_url,
-          price: price,
+          original_price: original_price,
           publisher: publisher,
           internal_code: internal_code,
           url: url,
+          known_supplier: 'cyuanhua'
         }
+
+        @after_each_proc.call(book: book) if @after_each_proc
+
+        @books << book
         done_book_count += 1
-        print "#{done_book_count} / #{book_count}\n"
+        # print "#{done_book_count} / #{book_count}\n"
       end # end Thread
     end # end each book_urls
     ThreadsWait.all_waits(*@threads)
@@ -135,37 +153,7 @@ class CyuanhuaBookCrawler
     end
   end
 
-  def isbn_to_13 isbn
-    case isbn.length
-    when 13
-      return ISBN.thirteen isbn
-    when 10
-      return ISBN.thirteen isbn
-    when 12
-      return "#{isbn}#{isbn_checksum(isbn)}"
-    when 9
-      return ISBN.thirteen("#{isbn}#{isbn_checksum(isbn)}")
-    end
-  end
-
-  def isbn_checksum(isbn)
-    isbn.gsub!(/[^(\d|X)]/, '')
-    c = 0
-    if isbn.length <= 10
-      10.downto(2) {|i| c += isbn[10-i].to_i * i}
-      c %= 11
-      c = 11 - c
-      c ='X' if c == 10
-      return c
-    elsif isbn.length <= 13
-      (1..11).step(2) {|i| c += isbn[i].to_i}
-      c *= 3
-      (0..11).step(2) {|i| c += isbn[i].to_i}
-      c = (220-c) % 10
-      return c
-    end
-  end
 end
 
-cc = CyuanhuaBookCrawler.new
-File.write('cyuanhua_books.json', JSON.pretty_generate(cc.books))
+# cc = CyuanhuaBookCrawler.new
+# File.write('cyuanhua_books.json', JSON.pretty_generate(cc.books))
